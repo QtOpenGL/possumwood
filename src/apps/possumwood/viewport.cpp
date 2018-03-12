@@ -6,74 +6,129 @@
 
 #include <QtGui/QMouseEvent>
 
-#include <GL/glu.h>
+#include <possumwood_sdk/gl.h>
 
-namespace {
-	std::vector<Viewport*> s_instances;
-}
+#include "gl_init.h"
 
-Viewport::Viewport(QWidget* parent) : QGLWidget(parent, (s_instances.size()>0 ? s_instances[0] : NULL)), m_sceneDistance(10), m_sceneRotationX(30), m_sceneRotationY(30), m_mouseX(0), m_mouseY(0) {
-	s_instances.push_back(this);
-
+Viewport::Viewport(QWidget* parent)
+    : QOpenGLWidget(parent), m_sceneDistance(10), m_sceneRotationX(30),
+      m_sceneRotationY(30), m_origin(0, 0, 0), m_mouseX(0), m_mouseY(0) {
 	setMouseTracking(true);
+
+	GL_CHECK_ERR;
 }
 
 Viewport::~Viewport() {
-	int index = -1;
-	for(unsigned a=0;a<s_instances.size();a++)
-		if(s_instances[a] == this)
-			index = a;
-	assert(index >= 0);
-	s_instances.erase(s_instances.begin()+index);
 }
 
 void Viewport::initializeGL() {
-	glClearColor(0,0,0,0);
+	GL_CHECK_ERR;
+
+	// initialize GLEW
+	doInitGlew();
+
+	GL_CHECK_ERR;
+
+	// setup the viewport basics
+	glClearColor(0, 0, 0, 0);
 	resizeGL(width(), height());
 
 	glEnable(GL_DEPTH_TEST);
 	glDepthFunc(GL_LEQUAL);
 
-	float white[3] = {1,1,1};
-	float position[4] = {1,1,1,0};
-
-	glEnable(GL_LIGHT0);
-	glLightfv(GL_LIGHT0, GL_AMBIENT, white);
-	glLightfv(GL_LIGHT0, GL_DIFFUSE, white);
-	glLightfv(GL_LIGHT0, GL_POSITION, position);
-
-	// glEnable(GL_COLOR_MATERIAL);
-
+	// store current FPS timer value
 	m_timer = boost::posix_time::microsec_clock::universal_time();
+
+	GL_CHECK_ERR;
+}
+
+namespace {
+
+Imath::V3f eyePosition(float sceneRotX, float sceneRotY, float sceneDist) {
+	Imath::V3f eye;
+
+	eye.x = sin(-sceneRotX / 180.0f * M_PI) * sceneDist;
+	eye.z = cos(-sceneRotX / 180.0f * M_PI) * sceneDist;
+
+	eye.y = sin(sceneRotY / 180.0f * M_PI) * sceneDist;
+	eye.x *= cos(sceneRotY / 180.0f * M_PI);
+	eye.z *= cos(sceneRotY / 180.0f * M_PI);
+
+	return eye;
+}
+
+Imath::M44f lookAt(const Imath::V3f& eyePosition, const Imath::V3f& lookAt,
+                   const Imath::V3f& upVector) {
+	Imath::V3f forward = lookAt - eyePosition;
+	forward.normalize();
+
+	Imath::V3f side = forward.cross(upVector);
+	side.normalize();
+
+	Imath::V3f up = side.cross(forward);
+	up.normalize();
+
+	Imath::M44f rotmat;
+	rotmat.makeIdentity();
+
+	rotmat[0][0] = side.x;
+	rotmat[1][0] = side.y;
+	rotmat[2][0] = side.z;
+
+	rotmat[0][1] = up.x;
+	rotmat[1][1] = up.y;
+	rotmat[2][1] = up.z;
+
+	rotmat[0][2] = -forward.x;
+	rotmat[1][2] = -forward.y;
+	rotmat[2][2] = -forward.z;
+
+	Imath::M44f transmat;
+	transmat.setTranslation(Imath::V3f(-eyePosition.x, -eyePosition.y, -eyePosition.z));
+
+	return transmat * rotmat;
+}
+
+Imath::M44f perspective(float fovyInDegrees, float aspectRatio, float znear, float zfar) {
+	const float f = 1.0 / tanf(fovyInDegrees * M_PI / 360.0);
+	const float A = (zfar + znear) / (znear - zfar);
+	const float B = 2.0 * zfar * znear / (znear - zfar);
+
+	return Imath::M44f(f / aspectRatio, 0, 0, 0, 0, f, 0, 0, 0, 0, A, -1, 0, 0, B, 0);
+}
 }
 
 void Viewport::paintGL() {
+	GL_CHECK_ERR;
+
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	gluPerspective(45, (float)width() / (float)height(), m_sceneDistance*0.1f, std::max(m_sceneDistance*2.0f, 1000.0f));
+	// update the projection matrix
+	m_projection =
+	    perspective(45, (float)width() / (float)height(), m_sceneDistance * 0.1f,
+	                std::max(m_sceneDistance * 2.0f, 1000.0f));
 
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-	gluLookAt(0,0,m_sceneDistance, 0,0,0, 0,1,0);
+	m_modelview = lookAt(
+	    eyePosition(m_sceneRotationX, m_sceneRotationY, m_sceneDistance) + m_origin,
+	    m_origin, Imath::V3f(0, 1, 0));
 
-	glRotatef(m_sceneRotationY, 1, 0, 0);
-	glRotatef(m_sceneRotationX, 0, 1, 0);
-
+	// record the time difference between frames, to determine current FPS
 	const boost::posix_time::ptime t(boost::posix_time::microsec_clock::universal_time());
 	const float dt = (float)(t - m_timer).total_microseconds() / 1e6f;
 	m_timer = t;
 
-	glPushAttrib(GL_ALL_ATTRIB_BITS);
+	// emit the render signal, to render everything in the scene (implemented in Adaptor)
 	emit render(dt);
-	glPopAttrib();
+
+	GL_CHECK_ERR;
 }
 
 void Viewport::resizeGL(int w, int h) {
-	QGLWidget::resizeGL(w,h);
+	GL_CHECK_ERR;
+	QOpenGLWidget::resizeGL(w, h);
 
 	glViewport(0, 0, w, h);
+	GL_CHECK_ERR;
 }
 
 void Viewport::mouseMoveEvent(QMouseEvent* event) {
@@ -83,8 +138,8 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
 
 		update();
 	}
-	m_sceneRotationY = std::max(-90.0f, m_sceneRotationY);
-	m_sceneRotationY = std::min(90.0f, m_sceneRotationY);
+	m_sceneRotationY = std::max(-89.0f, m_sceneRotationY);
+	m_sceneRotationY = std::min(89.0f, m_sceneRotationY);
 
 	if(event->buttons() & Qt::RightButton) {
 		m_sceneDistance /= pow(10, (float)(event->y() - m_mouseY) / (float)height());
@@ -92,6 +147,32 @@ void Viewport::mouseMoveEvent(QMouseEvent* event) {
 		update();
 	}
 
+	if(event->buttons() & Qt::MiddleButton) {
+		const Imath::V3f eye =
+		    eyePosition(m_sceneRotationX, m_sceneRotationY, m_sceneDistance);
+
+		const float dx = -(float)(event->x() - m_mouseX) / (float)(width());
+		const float dy = (float)(event->y() - m_mouseY) / (float)(height());
+
+		Imath::V3f right = Imath::V3f(0, 1, 0).cross(eye).normalized();
+		Imath::V3f up = eye.cross(right).normalized();
+
+		right = right * m_sceneDistance * dx;
+		up = up * m_sceneDistance * dy;
+
+		m_origin += right + up;
+
+		update();
+	}
+
 	m_mouseX = event->x();
 	m_mouseY = event->y();
+}
+
+const Imath::M44f& Viewport::projection() const {
+	return m_projection;
+}
+
+const Imath::M44f& Viewport::modelview() const {
+	return m_modelview;
 }
